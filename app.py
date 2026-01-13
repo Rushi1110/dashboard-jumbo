@@ -4,140 +4,152 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 
-# --- SETTINGS ---
-st.set_page_config(page_title="Jumbo Homes Internal Dashboard", layout="wide")
+# --- 1. SETTINGS & STYLING ---
+st.set_page_config(page_title="Jumbo Homes | Internal Tool", layout="wide")
 
+st.markdown("""
+    <style>
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; }
+    .main { background-color: #f8f9fb; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. ROBUST DATA LOADING ---
 @st.cache_data
-def load_data():
-    # Load all files using simplified names
-    owners = pd.read_csv('Owners.csv')
-    visits = pd.read_csv('Visits.csv')
-    buyers = pd.read_csv('Buyers.csv')
-    inspections = pd.read_csv('home_inspection.csv')
-    homes = pd.read_csv('Homes.csv')
-    catalogue = pd.read_csv('home_catalogue.csv')
-    price_hist = pd.read_csv('price-history-new.csv')
-    offers = pd.read_csv('offers.csv')
-    admins = pd.read_csv('Admins.csv')
+def load_and_clean_data():
+    # Load files with simplified names
+    f_map = {
+        'owners': 'Owners.csv', 'visits': 'Visits.csv', 'buyers': 'Buyers.csv',
+        'inspections': 'home_inspection.csv', 'homes': 'Homes.csv',
+        'catalogue': 'home_catalogue.csv', 'price_hist': 'price-history-new.csv',
+        'offers': 'offers.csv', 'admins': 'Admins.csv'
+    }
     
-    # Pre-processing Floor Plans
-    catalogue['has_fp'] = catalogue['Media/Floor Plan'].apply(lambda x: 1 if (pd.notna(x) and 'https' in str(x)) else 0)
+    data = {}
+    for key, path in f_map.items():
+        try:
+            data[key] = pd.read_csv(path)
+        except Exception:
+            st.error(f"Critical Error: Missing file {path}")
+            st.stop()
+
+    # Derived Column: Project Name (Extracted from HID)
+    data['visits']['Project'] = data['visits']['Homes_Visited'].astype(str).apply(lambda x: x.split('_')[0] if '_' in x else "Unknown")
     
-    # Clean Agent Names & Roles
-    admins['First Name'] = admins['First Name'].str.strip()
-    valid_roles = ['Buyer Agent', 'BSA', 'Buyer Success Agent']
-    agent_list = admins[admins['Role'].isin(valid_roles)]['First Name'].unique().tolist()
+    # Floor Plan Verification (Non-null + https)
+    data['catalogue']['has_fp'] = data['catalogue']['Media/Floor Plan'].apply(lambda x: 1 if (pd.notna(x) and 'https' in str(x)) else 0)
+
+    # Standardize Visit Completion
+    data['visits']['is_comp'] = (data['visits']['Status/Visit Completed'] == True) | (data['visits']['Status/Visit_status'].str.contains('Completed', na=False))
+
+    # Clean Admin Roles
+    data['admins']['Role'] = data['admins']['Role'].fillna('Unknown').str.strip()
     
-    return owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins, agent_list
+    return data
 
-owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins, agent_list = load_data()
+data = load_and_clean_data()
 
-# --- SIDEBAR FILTERS (From Data Table) ---
-st.sidebar.title("🔍 Filters")
+# --- 3. DYNAMIC SIDEBAR FILTERS (From Datatables) ---
+st.sidebar.title("📊 Filter Engine")
 
-# 1. Year Filter
-years = sorted(list(visits['Internal/Year'].dropna().unique()), reverse=True)
-selected_year = st.sidebar.selectbox("Year", [None] + years, index=1 if years else 0)
+# Date Filters (from Visits table)
+years = sorted([y for y in data['visits']['Internal/Year'].dropna().unique()], reverse=True)
+sel_year = st.sidebar.selectbox("Year", [None] + years, index=1 if len(years) > 0 else 0)
 
-# 2. Month Filter
-months = visits[visits['Internal/Year'] == selected_year]['Internal/Month'].dropna().unique().tolist()
-selected_month = st.sidebar.selectbox("Month", [None] + months)
+months = sorted(data['visits'][data['visits']['Internal/Year'] == sel_year]['Internal/Month'].dropna().unique().tolist()) if sel_year else []
+sel_month = st.sidebar.selectbox("Month", [None] + months)
 
-# 3. Week Filter
-weeks = visits[(visits['Internal/Year'] == selected_year) & (visits['Internal/Month'] == selected_month)]['Internal/Week'].dropna().unique().tolist()
-selected_week = st.sidebar.selectbox("Week", [None] + weeks)
+weeks = sorted(data['visits'][(data['visits']['Internal/Year'] == sel_year) & (data['visits']['Internal/Month'] == sel_month)]['Internal/Week'].dropna().unique().tolist()) if sel_month else []
+sel_week = st.sidebar.selectbox("Week", [None] + weeks)
 
-# 4. Locality Filter (Unified)
-all_localities = sorted(list(set(owners['Locality'].dropna().unique()) | set(visits['Visit_location'].dropna().unique())))
-selected_locality = st.sidebar.multiselect("Locality", all_localities)
+# Locality Filter (Consolidated from all tables)
+localities = sorted(list(set(data['owners']['Locality'].dropna()) | set(data['visits']['Visit_location'].dropna())))
+sel_loc = st.sidebar.multiselect("Locality / Zone", localities)
 
-# 5. Agent Filter (Buyer Agents/BSA Only)
-selected_agents = st.sidebar.multiselect("Agents", agent_list)
+# Agent Filter (Buyer Agents and BSA Only)
+target_roles = ['Buyer Agent', 'BSA', 'Buyer Success Agent']
+agent_df = data['admins'][data['admins']['Role'].isin(target_roles)]
+agent_list = sorted(agent_df['First Name'].dropna().unique().tolist())
+sel_agents = st.sidebar.multiselect("Agents (Lead Owners/VAs)", agent_list)
 
-# --- FILTERING LOGIC ---
-def apply_filters(df, year_col, month_col, week_col, loc_col=None):
-    temp_df = df.copy()
-    if selected_year: temp_df = temp_df[temp_df[year_col] == selected_year]
-    if selected_month: temp_df = temp_df[temp_df[month_col] == selected_month]
-    if selected_week: temp_df = temp_df[temp_df[week_col] == selected_week]
-    if selected_locality and loc_col: temp_df = temp_df[temp_df[loc_col].isin(selected_locality)]
-    return temp_df
+# --- 4. FILTERING ENGINE ---
+def apply_global_filters(df, y_col, m_col, w_col, l_col=None, agent_col=None):
+    df_f = df.copy()
+    if sel_year: df_f = df_f[df_f[y_col] == sel_year]
+    if sel_month: df_f = df_f[df_f[m_col] == sel_month]
+    if sel_week: df_f = df_f[df_f[w_col] == sel_week]
+    if sel_loc and l_col: df_f = df_f[df_f[l_col].isin(sel_loc)]
+    return df_f
 
-f_owners = apply_filters(owners, 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Locality')
-f_visits = apply_filters(visits, 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Visit_location')
-f_buyers = apply_filters(buyers, 'Dates/Current-Year', 'Dates/Created_month', 'Dates/Created_week', 'Location/Locality')
+v_f = apply_global_filters(data['visits'], 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Visit_location')
+o_f = apply_global_filters(data['owners'], 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Locality')
+b_f = apply_global_filters(data['buyers'], 'Dates/Current-Year', 'Dates/Created_month', 'Dates/Created_week', 'Location/Locality')
+h_f = apply_global_filters(data['homes'], 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Building/Locality')
 
-# Agent Filtering (Leaderboard specific)
-if selected_agents:
-    f_visits = f_visits[f_visits['WA_Msg/VA_Name'].isin(selected_agents) | f_visits['Internal/LeadOwner'].isin(selected_agents)]
+# --- 5. TABS & VISUALS ---
+tab_lead, tab_supply, tab_sku, tab_demand = st.tabs(["🏆 Leaderboard", "📦 Supply", "🏠 SKU Analysis", "👤 Demand"])
 
-# --- TABBED VIEW ---
-tab1, tab2, tab3, tab4 = st.tabs(["🏆 Leaderboard", "📦 Supply", "🏠 SKU", "👤 Demand"])
-
-# --- TAB 1: LEADERBOARD & POINTS ---
-with tab1:
-    st.header("Agent Performance Leaderboard")
+with tab_lead:
+    st.subheader("Agent Performance Points")
     
-    # Points Calculation
-    agent_metrics = []
-    v_comp = f_visits[f_visits['Status/Visit Completed'] == True]
     
-    for agent in (selected_agents if selected_agents else agent_list):
-        # Demand Points (Lead Owners)
-        lo_v = v_comp[v_comp['Internal/LeadOwner'].str.contains(agent, na=False, case=False)]
-        lo_pts = 0
-        for phone, group in lo_v.groupby('Lead Phone'):
-            # Check if repeat visitor (ever visited on another day)
-            is_rv = visits[(visits['Lead Phone'] == phone) & (visits['Internal/Month'] != selected_month)].shape[0] > 0
-            lo_pts += 7 if is_rv else 3
+    leaderboard = []
+    # Points logic implementation
+    for name in (sel_agents if sel_agents else agent_list):
+        # 1. Lead Owner Points (3 for new, 7 for RV)
+        agent_v = v_f[(v_f['Internal/LeadOwner'].str.contains(name, na=False, case=False)) & (v_f['is_comp'] == True)]
+        pts_lo = 0
+        for phone, group in agent_v.groupby('Lead Phone'):
+            is_rv = data['visits'][(data['visits']['Lead Phone'] == phone) & (data['visits']['Internal/Month'] != sel_month)].shape[0] > 0
+            pts_lo += 7 if is_rv else 3
             
-        # Managed Points (VAs)
-        va_v = v_comp[v_comp['WA_Msg/VA_Name'] == agent]
-        va_pts = len(va_v) * 4
+        # 2. VA Points (4 per Managed Visit)
+        va_v = v_f[(v_f['WA_Msg/VA_Name'] == name) & (v_f['is_comp'] == True)]
+        pts_va = len(va_v) * 4
         
-        # Inspection Points
-        insp_pts = len(inspections[inspections['Inspected By'].str.contains(agent, na=False, case=False)]) * 4
+        # 3. Inspection Points (4 per Inspection)
+        insp = data['inspections'][data['inspections']['Inspected By'].str.contains(name, na=False, case=False)]
+        pts_ins = len(insp) * 4
         
-        agent_metrics.append({
-            "Agent": agent,
-            "Total Points": lo_pts + va_pts + insp_pts,
-            "Visitors Scheduled": len(f_visits[f_visits['Internal/LeadOwner'].str.contains(agent, na=False)]),
-            "Visitors Completed": len(lo_v),
+        leaderboard.append({
+            "Agent": name,
+            "Total Points": pts_lo + pts_va + pts_ins,
+            "Visitors Scheduled": v_f[v_f['Internal/LeadOwner'].str.contains(name, na=False)]['Lead Phone'].nunique(),
+            "Visitors Completed": agent_v['Lead Phone'].nunique(),
             "Visits Managed": len(va_v),
-            "Inspections": len(inspections[inspections['Inspected By'].str.contains(agent, na=False)])
+            "Inspections Done": len(insp)
         })
-
-    leader_df = pd.DataFrame(agent_metrics).sort_values("Total Points", ascending=False)
-    st.table(leader_df)
-
-# --- TAB 2: SUPPLY ---
-with tab2:
-    st.header("Supply Funnel")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Owner Leads", len(f_owners))
-    col2.metric("Owners Onboarded", len(f_owners[f_owners['Status'].isin(['Proposal Sent', 'Proposal Accepted'])]))
     
-    regret_loss = pd.to_numeric(homes[homes['Internal/Status'] == 'On Hold']['Home/Ask_Price (lacs)'], errors='coerce').sum()
-    col3.metric("Regrettable Loss", f"₹{regret_loss}L")
+    st.table(pd.DataFrame(leaderboard).sort_values("Total Points", ascending=False))
 
-# --- TAB 3: SKU ---
-with tab3:
-    st.header("Inventory Analysis")
-    st.metric("Live Homes", len(homes[homes['Internal/Status'] == 'Live']))
-    st.write("Top Projects")
-    top_projects = f_visits.groupby('Project').size().sort_values(ascending=False).head(10)
-    st.bar_chart(top_projects)
+with tab_supply:
+    st.header("Supply Funnel")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Owner Leads", len(o_f))
+    c2.metric("Owners Onboarded", len(o_f[o_f['Status'].isin(['Proposal Sent', 'Proposal Accepted'])]))
+    
+    regret = pd.to_numeric(h_f[h_f['Internal/Status'] == 'On Hold']['Home/Ask_Price (lacs)'], errors='coerce').sum()
+    c3.metric("Regrettable Loss", f"₹{regret}L")
 
-# --- TAB 4: DEMAND ---
-with tab4:
-    st.header("Demand Funnel")
-    b_leads = len(f_buyers)
-    v_sched = f_visits['Lead Phone'].nunique()
-    v_comp = f_visits[f_visits['Status/Visit Completed'] == True]['Lead Phone'].nunique()
+with tab_sku:
+    st.header("Inventory (SKU) Stats")
+    live = h_f[h_f['Internal/Status'] == 'Live']
+    st.metric("Live Homes", len(live))
+    
+    st.subheader("Top Projects by Activity")
+    if not v_f.empty:
+        # Fixed KeyError: Ensure column exists before grouping
+        proj_counts = v_f['Project'].value_counts().head(10)
+        st.bar_chart(proj_counts)
+
+with tab_demand:
+    st.header("Demand Conversion")
+    v_sched = v_f['Lead Phone'].nunique()
+    v_comp = v_f[v_f['is_comp'] == True]['Lead Phone'].nunique()
     
     fig = go.Figure(go.Funnel(
         y = ["Buyer Leads", "Visitors Scheduled", "Visitors Completed"],
-        x = [b_leads, v_sched, v_comp],
+        x = [len(b_f), v_sched, v_comp],
         textinfo = "value+percent initial"
     ))
-    st.plotly_chart(fig)
+    st.plotly_chart(fig, use_container_width=True)
