@@ -2,157 +2,142 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import os
+from datetime import datetime
 
-# --- 1. PAGE CONFIG ---
-st.set_page_config(page_title="Jumbo Homes | Internal Tool", layout="wide")
-
-# --- 2. DATA LOADING & SIMPLIFIED MAPPING ---
-def parse_dt(df, cols):
-    for col in cols:
-        if col in df.columns:
-            # utc=True and tz_localize(None) ensures no naive/aware comparison crashes
-            df[col] = pd.to_datetime(df[col], errors='coerce', utc=True).dt.tz_localize(None)
-    return df
+# --- SETTINGS ---
+st.set_page_config(page_title="Jumbo Homes Internal Dashboard", layout="wide")
 
 @st.cache_data
-def load_all_data():
-    # Simplified names as per your requirement
-    files = {
-        'owners': 'Owners.csv',
-        'visits': 'Visits.csv',
-        'buyers': 'Buyers.csv',
-        'inspections': 'home_inspection.csv',
-        'homes': 'Homes.csv',
-        'catalogue': 'home_catalogue.csv',
-        'price_hist': 'price-history-new.csv',
-        'offers': 'offers.csv',
-        'admins': 'Admins.csv',
-        'calls': 'Call_history.csv'
-    }
-
-    # Diagnostic: Check if files exist
-    missing = [f for f in files.values() if not os.path.exists(f)]
-    if missing:
-        st.error(f"❌ Missing Files: {', '.join(missing)}")
-        st.stop()
-
-    owners = parse_dt(pd.read_csv(files['owners']), ['Internal/Created On'])
-    visits = parse_dt(pd.read_csv(files['visits']), ['Scheduled Date'])
-    buyers = parse_dt(pd.read_csv(files['buyers']), ['Dates/Created On'])
-    inspections = parse_dt(pd.read_csv(files['inspections']), ['Inspected On'])
-    homes = parse_dt(pd.read_csv(files['homes']), ['Internal/Created On', 'Offboarding/DateTime'])
-    catalogue = pd.read_csv(files['catalogue'])
-    price_hist = parse_dt(pd.read_csv(files['price_hist']), ['date'])
-    offers = parse_dt(pd.read_csv(files['offers']), ['Offer Date'])
-    admins = pd.read_csv(files['admins'])
+def load_data():
+    # Load all files using simplified names
+    owners = pd.read_csv('Owners.csv')
+    visits = pd.read_csv('Visits.csv')
+    buyers = pd.read_csv('Buyers.csv')
+    inspections = pd.read_csv('home_inspection.csv')
+    homes = pd.read_csv('Homes.csv')
+    catalogue = pd.read_csv('home_catalogue.csv')
+    price_hist = pd.read_csv('price-history-new.csv')
+    offers = pd.read_csv('offers.csv')
+    admins = pd.read_csv('Admins.csv')
     
-    # Pre-processing
-    visits['Project'] = visits['Homes_Visited'].str.split('_').str[0]
+    # Pre-processing Floor Plans
     catalogue['has_fp'] = catalogue['Media/Floor Plan'].apply(lambda x: 1 if (pd.notna(x) and 'https' in str(x)) else 0)
     
-    return owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins
-
-owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins = load_all_data()
-
-# --- 3. FILTERS & MAPPING ---
-st.sidebar.title("📊 Control Center")
-# Set default to Jan 2026 for initial view
-date_range = st.sidebar.date_input("Analysis Period", [datetime(2026, 1, 1), datetime(2026, 1, 14)])
-
-if len(date_range) == 2:
-    start_dt, end_dt = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-    delta = (end_dt - start_dt).days + 1
-    p_start, p_end = start_dt - timedelta(days=delta), start_dt - timedelta(days=1)
-else:
-    st.stop()
-
-# Helper for Lead Owner / VA mapping
-email_to_name = admins.set_index('Email')['First Name'].to_dict()
-def get_name(val):
-    if pd.isna(val): return "Unknown"
-    v = str(val).strip().lower()
-    for email, name in email_to_name.items():
-        if str(email).lower() == v: return name
-    return str(val)
-
-# --- 4. TABS ---
-tab_lead, tab_supply, tab_sku, tab_demand, tab_admin = st.tabs([
-    "🏆 Leaderboard", "📦 Supply", "🏠 SKU", "👤 Demand", "⚙️ Admin"
-])
-
-# Admin Tab for Manual Overrides
-with tab_admin:
-    st.header("Point Overrides")
-    c1, c2 = st.columns(2)
-    tour_pts = c1.number_input("Pts: Tour", value=20)
-    rate_pts = c2.number_input("Pts: Rating", value=10)
-    manual_data = {}
-    for person in admins['First Name'].unique():
-        col1, col2 = st.columns(2)
-        t = col1.number_input(f"Tours: {person}", 0, key=f"t_{person}")
-        r = col2.number_input(f"Ratings: {person}", 0, key=f"r_{person}")
-        manual_data[person] = (t * tour_pts) + (r * rate_pts)
-
-# Leaderboard Logic
-with tab_lead:
-    cv = visits[(visits['Scheduled Date'] >= start_dt) & (visits['Scheduled Date'] <= end_dt)]
-    cv_comp = cv[cv['Status/Visit Completed'] == True]
-    ci = inspections[(inspections['Inspected On'] >= start_dt) & (inspections['Inspected On'] <= end_dt)]
+    # Clean Agent Names & Roles
+    admins['First Name'] = admins['First Name'].str.strip()
+    valid_roles = ['Buyer Agent', 'BSA', 'Buyer Success Agent']
+    agent_list = admins[admins['Role'].isin(valid_roles)]['First Name'].unique().tolist()
     
-    lo_pts_list = []
-    for phone, group in cv_comp.groupby('Lead Phone'):
-        owner = get_name(group['Internal/LeadOwner'].iloc[0])
-        past = visits[(visits['Lead Phone'] == phone) & (visits['Scheduled Date'] < start_dt) & (visits['Status/Visit Completed'] == True)]
-        is_rv = not past.empty or group['Scheduled Date'].dt.date.nunique() > 1
-        lo_pts_list.append({'Person': owner, 'Pts': 7 if is_rv else 3})
+    return owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins, agent_list
+
+owners, visits, buyers, inspections, homes, catalogue, price_hist, offers, admins, agent_list = load_data()
+
+# --- SIDEBAR FILTERS (From Data Table) ---
+st.sidebar.title("🔍 Filters")
+
+# 1. Year Filter
+years = sorted(list(visits['Internal/Year'].dropna().unique()), reverse=True)
+selected_year = st.sidebar.selectbox("Year", [None] + years, index=1 if years else 0)
+
+# 2. Month Filter
+months = visits[visits['Internal/Year'] == selected_year]['Internal/Month'].dropna().unique().tolist()
+selected_month = st.sidebar.selectbox("Month", [None] + months)
+
+# 3. Week Filter
+weeks = visits[(visits['Internal/Year'] == selected_year) & (visits['Internal/Month'] == selected_month)]['Internal/Week'].dropna().unique().tolist()
+selected_week = st.sidebar.selectbox("Week", [None] + weeks)
+
+# 4. Locality Filter (Unified)
+all_localities = sorted(list(set(owners['Locality'].dropna().unique()) | set(visits['Visit_location'].dropna().unique())))
+selected_locality = st.sidebar.multiselect("Locality", all_localities)
+
+# 5. Agent Filter (Buyer Agents/BSA Only)
+selected_agents = st.sidebar.multiselect("Agents", agent_list)
+
+# --- FILTERING LOGIC ---
+def apply_filters(df, year_col, month_col, week_col, loc_col=None):
+    temp_df = df.copy()
+    if selected_year: temp_df = temp_df[temp_df[year_col] == selected_year]
+    if selected_month: temp_df = temp_df[temp_df[month_col] == selected_month]
+    if selected_week: temp_df = temp_df[temp_df[week_col] == selected_week]
+    if selected_locality and loc_col: temp_df = temp_df[temp_df[loc_col].isin(selected_locality)]
+    return temp_df
+
+f_owners = apply_filters(owners, 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Locality')
+f_visits = apply_filters(visits, 'Internal/Year', 'Internal/Month', 'Internal/Week', 'Visit_location')
+f_buyers = apply_filters(buyers, 'Dates/Current-Year', 'Dates/Created_month', 'Dates/Created_week', 'Location/Locality')
+
+# Agent Filtering (Leaderboard specific)
+if selected_agents:
+    f_visits = f_visits[f_visits['WA_Msg/VA_Name'].isin(selected_agents) | f_visits['Internal/LeadOwner'].isin(selected_agents)]
+
+# --- TABBED VIEW ---
+tab1, tab2, tab3, tab4 = st.tabs(["🏆 Leaderboard", "📦 Supply", "🏠 SKU", "👤 Demand"])
+
+# --- TAB 1: LEADERBOARD & POINTS ---
+with tab1:
+    st.header("Agent Performance Leaderboard")
     
-    lo_pts = pd.DataFrame(lo_pts_list).groupby('Person')['Pts'].sum() if lo_pts_list else pd.Series(dtype=int)
-    va_pts = cv_comp.groupby('WA_Msg/VA_Name').size() * 4
-    ins_pts = ci.groupby('Inspected By').size() * 4
-    ins_pts.index = [get_name(x) for x in ins_pts.index]
+    # Points Calculation
+    agent_metrics = []
+    v_comp = f_visits[f_visits['Status/Visit Completed'] == True]
     
-    leader_df = []
-    for p in admins['First Name'].unique():
-        total = lo_pts.get(p,0) + va_pts.get(p,0) + ins_pts.get(p,0) + manual_data.get(p,0)
-        leader_df.append({
-            "Person": p, "Score": total,
-            "Sched": cv[cv['Internal/LeadOwner'].apply(get_name) == p].shape[0],
-            "Comp": cv_comp[cv_comp['Internal/LeadOwner'].apply(get_name) == p].shape[0],
-            "Managed": cv_comp[cv_comp['WA_Msg/VA_Name'] == p].shape[0]
+    for agent in (selected_agents if selected_agents else agent_list):
+        # Demand Points (Lead Owners)
+        lo_v = v_comp[v_comp['Internal/LeadOwner'].str.contains(agent, na=False, case=False)]
+        lo_pts = 0
+        for phone, group in lo_v.groupby('Lead Phone'):
+            # Check if repeat visitor (ever visited on another day)
+            is_rv = visits[(visits['Lead Phone'] == phone) & (visits['Internal/Month'] != selected_month)].shape[0] > 0
+            lo_pts += 7 if is_rv else 3
+            
+        # Managed Points (VAs)
+        va_v = v_comp[v_comp['WA_Msg/VA_Name'] == agent]
+        va_pts = len(va_v) * 4
+        
+        # Inspection Points
+        insp_pts = len(inspections[inspections['Inspected By'].str.contains(agent, na=False, case=False)]) * 4
+        
+        agent_metrics.append({
+            "Agent": agent,
+            "Total Points": lo_pts + va_pts + insp_pts,
+            "Visitors Scheduled": len(f_visits[f_visits['Internal/LeadOwner'].str.contains(agent, na=False)]),
+            "Visitors Completed": len(lo_v),
+            "Visits Managed": len(va_v),
+            "Inspections": len(inspections[inspections['Inspected By'].str.contains(agent, na=False)])
         })
-    st.table(pd.DataFrame(leader_df).sort_values("Score", ascending=False))
 
-# Supply Tab
-with tab_supply:
-    curr_o = len(owners[(owners['Internal/Created On'] >= start_dt) & (owners['Internal/Created On'] <= end_dt)])
-    prev_o = len(owners[(owners['Internal/Created On'] >= p_start) & (owners['Internal/Created On'] <= p_end)])
-    curr_h = len(homes[(homes['Internal/Created On'] >= start_dt) & (homes['Internal/Created On'] <= end_dt)])
-    prev_h = len(homes[(homes['Internal/Created On'] >= p_start) & (homes['Internal/Created On'] <= p_end)])
-    
+    leader_df = pd.DataFrame(agent_metrics).sort_values("Total Points", ascending=False)
+    st.table(leader_df)
+
+# --- TAB 2: SUPPLY ---
+with tab2:
+    st.header("Supply Funnel")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Owner Leads", curr_o, f"{curr_o - prev_o}")
-    col2.metric("Homes Onboarded", curr_h, f"{curr_h - prev_h}")
+    col1.metric("Owner Leads", len(f_owners))
+    col2.metric("Owners Onboarded", len(f_owners[f_owners['Status'].isin(['Proposal Sent', 'Proposal Accepted'])]))
     
-    loss = homes[(homes['Offboarding/DateTime'] >= start_dt) & (homes['Offboarding/DateTime'] <= end_dt)]
-    regret = pd.to_numeric(loss[loss['Internal/Status'].isin(['On Hold', 'Sold'])]['Home/Ask_Price (lacs)'], errors='coerce').sum()
-    col3.metric("Regrettable Loss", f"₹{regret}L")
+    regret_loss = pd.to_numeric(homes[homes['Internal/Status'] == 'On Hold']['Home/Ask_Price (lacs)'], errors='coerce').sum()
+    col3.metric("Regrettable Loss", f"₹{regret_loss}L")
 
-# SKU Tab
-with tab_sku:
-    live = len(homes[homes['Internal/Status'] == 'Live'])
-    fp = catalogue[catalogue['has_fp'] == 1].shape[0]
-    st.metric("Live Inventory", live)
-    st.metric("Verified Floor Plans", f"{fp} ({round(fp/max(live,1)*100,1)}%)")
-    st.bar_chart(cv.groupby('Project').size().sort_values(ascending=False).head(10))
+# --- TAB 3: SKU ---
+with tab3:
+    st.header("Inventory Analysis")
+    st.metric("Live Homes", len(homes[homes['Internal/Status'] == 'Live']))
+    st.write("Top Projects")
+    top_projects = f_visits.groupby('Project').size().sort_values(ascending=False).head(10)
+    st.bar_chart(top_projects)
 
-# Demand Tab
-with tab_demand:
-    b_leads = buyers[(buyers['Dates/Created On'] >= start_dt) & (buyers['Dates/Created On'] <= end_dt)]
+# --- TAB 4: DEMAND ---
+with tab4:
+    st.header("Demand Funnel")
+    b_leads = len(f_buyers)
+    v_sched = f_visits['Lead Phone'].nunique()
+    v_comp = f_visits[f_visits['Status/Visit Completed'] == True]['Lead Phone'].nunique()
+    
     fig = go.Figure(go.Funnel(
         y = ["Buyer Leads", "Visitors Scheduled", "Visitors Completed"],
-        x = [b_leads['Contact/Phone'].nunique(), cv['Lead Phone'].nunique(), cv_comp['Lead Phone'].nunique()],
+        x = [b_leads, v_sched, v_comp],
         textinfo = "value+percent initial"
     ))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig)
